@@ -1,5 +1,7 @@
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
+import random
 from typing import Annotated
 import urllib.error
 import urllib.request
@@ -30,16 +32,27 @@ from mlops_ccds.config import (
     FIGURES_DIR,
     MLFLOW_EXPERIMENT_NAME,
     MLFLOW_TRACKING_URI,
-    PROCESSED_DATA_DIR,
     RANDOM_STATE,
     REPORTS_DIR,
     TEST_SIZE,
     VAL_SIZE,
 )
-from mlops_ccds.features import Splits, build_preprocessor, ensure_splits
+from mlops_ccds.dataset import clean_data, load_raw
+from mlops_ccds.features import Splits, build_preprocessor, split_data
 from mlops_ccds.plots import plot_diagnostics, save_figure
 
 app = typer.Typer()
+
+
+def set_seed(seed: int) -> None:
+    """Fija las semillas globales de Python y NumPy.
+
+    La reproducibilidad no depende solo de esto: la partición, el modelo y la validación
+    cruzada reciben la misma semilla de forma explícita (random_state=seed).
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+
 
 # Hiperparámetros que se registran en MLflow para cada modelo
 LOGGED_HYPERPARAMS = {
@@ -187,6 +200,21 @@ def write_notes(run_name, params, threshold, metrics, reports_dir: Path) -> Path
     return path
 
 
+def write_metrics_json(run_name, seed, params, threshold, val_f1, metrics, reports_dir: Path):
+    """Métricas con precisión completa: sirve para comparar dos ejecuciones bit a bit."""
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    path = reports_dir / f"metrics_{run_name}.json"
+    payload = {
+        "seed": seed,
+        "hyperparameters": params,
+        "optimal_threshold": threshold,
+        "val_best_f1_score": val_f1,
+        **metrics,
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    return path
+
+
 def hyperparams_to_log(spec: ModelSpec, best_params: dict) -> dict:
     """Hiperparámetros efectivos del modelo: los de la rejilla ganadora o los fijos del CLI."""
     classifier_params = spec.classifier.get_params()
@@ -220,6 +248,7 @@ def log_run(
     metrics: dict,
     plot_path: Path,
     notes_path: Path,
+    metrics_path: Path,
     model_type: str,
 ) -> str:
     """Registra params, métricas, gráficas, notas y el modelo en el servidor MLflow."""
@@ -244,6 +273,7 @@ def log_run(
 
         mlflow.log_artifact(str(plot_path), artifact_path="evaluation_plots")
         mlflow.log_artifact(str(notes_path), artifact_path="metadata")
+        mlflow.log_artifact(str(metrics_path), artifact_path="metadata")
 
         signature = infer_signature(splits.X_val, pipeline.predict(splits.X_val))
         mlflow.sklearn.log_model(
@@ -259,7 +289,7 @@ def log_run(
 def main(
     model: Annotated[str, typer.Option(help="Modelo a entrenar: 'hgb' o 'baseline'.")] = "hgb",
     seed: Annotated[
-        int, typer.Option(help="Semilla aleatoria del modelo y la validación cruzada.")
+        int, typer.Option(help="Semilla única: partición de datos, modelo y validación cruzada.")
     ] = RANDOM_STATE,
     learning_rate: Annotated[float, typer.Option(help="[hgb] Tasa de aprendizaje.")] = 0.1,
     max_depth: Annotated[int, typer.Option(help="[hgb] Profundidad máxima de cada árbol.")] = 8,
@@ -282,9 +312,6 @@ def main(
         bool, typer.Option(help="Con --tune, usa una rejilla mínima (pruebas).")
     ] = False,
     run_name: Annotated[str | None, typer.Option(help="Nombre del run en MLflow.")] = None,
-    data_dir: Annotated[
-        Path, typer.Option(help="Carpeta con train/val/test.csv.")
-    ] = PROCESSED_DATA_DIR,
     log_to_mlflow: Annotated[bool, typer.Option(help="Registra el run en MLflow.")] = True,
 ):
     """Entrena un modelo de churn, lo evalúa en Test y registra el run en MLflow.
@@ -311,7 +338,10 @@ def main(
         )
         log_to_mlflow = False
 
-    splits = ensure_splits(data_dir)
+    # La partición se recalcula siempre con la semilla recibida: el resultado depende solo
+    # de los argumentos y del CSV crudo, no de archivos intermedios que pudieran estar viejos.
+    set_seed(seed)
+    splits = split_data(clean_data(load_raw()), random_state=seed)
     pipeline = build_pipeline(build_preprocessor(splits.X_train), spec.classifier)
 
     logger.info(f"[{run_name}] Entrenando (semilla {seed})...")
@@ -336,6 +366,9 @@ def main(
     plot_path = save_figure(fig, FIGURES_DIR / f"{run_name}_evaluation_plots.png")
     plt.close(fig)
     notes_path = write_notes(run_name, logged_params, threshold, metrics, REPORTS_DIR)
+    metrics_path = write_metrics_json(
+        run_name, seed, logged_params, threshold, val_f1, metrics, REPORTS_DIR
+    )
 
     if not log_to_mlflow:
         logger.warning("El run no se registró en MLflow.")
@@ -352,6 +385,7 @@ def main(
         metrics,
         plot_path,
         notes_path,
+        metrics_path,
         type(spec.classifier).__name__,
     )
     logger.success(f"RUN ID registrado en MLflow: {run_id}")

@@ -91,17 +91,6 @@ def load_splits(input_dir: Path = PROCESSED_DATA_DIR) -> Splits:
     return Splits(**parts)
 
 
-def ensure_splits(data_dir: Path = PROCESSED_DATA_DIR, seed: int = RANDOM_STATE) -> Splits:
-    """Lee las particiones de data/processed; si no existen, las genera desde el CSV crudo."""
-    if all((data_dir / f"{name}.csv").exists() for name in SPLIT_NAMES):
-        return load_splits(data_dir)
-
-    logger.info(f"No hay particiones en {data_dir}; se generan desde los datos crudos.")
-    splits = split_data(clean_data(load_raw()), random_state=seed)
-    save_splits(splits, data_dir)
-    return splits
-
-
 @app.command()
 def main(
     input_path: Path = PROCESSED_DATA_DIR / CLEAN_CSV_NAME,
