@@ -1,0 +1,5 @@
+Entrenamiento Baseline_LogisticRegression_v2 finalizado.
+Umbral óptimo en validación: 0.6732
+Test ROC-AUC: 0.7228
+Test PR-AUC: 0.3069
+Test F1: 0.3485

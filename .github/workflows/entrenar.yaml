@@ -1,0 +1,117 @@
+name: Entrenamiento
+
+# Solo entrena y registra el run en MLflow. No corre lint ni pruebas.
+# Se lanza a mano: Actions > Entrenamiento > Run workflow, o con
+#   gh workflow run entrenar.yaml -f seed=7 -f learning_rate=0.05
+#
+# Dónde vive cada valor:
+#   - Aquí, en git: la semilla y los hiperparámetros por defecto (inputs).
+#   - Secrets:      MLFLOW_TRACKING_URI.
+#   - Variables:    MLFLOW_EXPERIMENT_NAME.
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Modelo a entrenar
+        type: choice
+        options: [hgb, baseline]
+        default: hgb
+      seed:
+        description: Semilla aleatoria (partición, modelo y validación cruzada)
+        default: "42"
+      learning_rate:
+        description: "[hgb] Tasa de aprendizaje"
+        default: "0.1"
+      max_depth:
+        description: "[hgb] Profundidad máxima de cada árbol"
+        default: "8"
+      max_leaf_nodes:
+        description: "[hgb] Máximo de hojas por árbol"
+        default: "31"
+      min_samples_leaf:
+        description: "[hgb] Mínimo de muestras por hoja"
+        default: "20"
+      l2_regularization:
+        description: "[hgb] Regularización L2"
+        default: "1.5"
+      c:
+        description: "[baseline] Inverso de la regularización"
+        default: "1.0"
+      tune:
+        description: Buscar hiperparámetros con GridSearchCV (tarda)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  entrenar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      # Secret: la URL de MLflow no se escribe en ningún archivo del repo.
+      MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+      # Variable: si no existe, se usa el nombre por defecto de config.py.
+      MLFLOW_EXPERIMENT_NAME: ${{ vars.MLFLOW_EXPERIMENT_NAME || 'Churn_Test_Telco_v1' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verificar que MLflow responde
+        # Sin esto, train.py entrenaría sin registrar y el job saldría en verde.
+        run: |
+          if [ -z "$MLFLOW_TRACKING_URI" ]; then
+            echo "::error::Falta el secret MLFLOW_TRACKING_URI (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+          curl -fsS --max-time 15 "${MLFLOW_TRACKING_URI%/}/health" > /dev/null \
+            || { echo "::error::MLflow no responde en la URL del secret."; exit 1; }
+
+      - name: Entrenar
+        # Los inputs pasan por env y se citan en el comando; no se interpolan dentro del script.
+        env:
+          MODEL: ${{ inputs.model }}
+          SEED: ${{ inputs.seed }}
+          LEARNING_RATE: ${{ inputs.learning_rate }}
+          MAX_DEPTH: ${{ inputs.max_depth }}
+          MAX_LEAF_NODES: ${{ inputs.max_leaf_nodes }}
+          MIN_SAMPLES_LEAF: ${{ inputs.min_samples_leaf }}
+          L2_REGULARIZATION: ${{ inputs.l2_regularization }}
+          C: ${{ inputs.c }}
+          TUNE: ${{ inputs.tune }}
+        run: |
+          ARGS=(
+            --model "$MODEL"
+            --seed "$SEED"
+            --learning-rate "$LEARNING_RATE"
+            --max-depth "$MAX_DEPTH"
+            --max-leaf-nodes "$MAX_LEAF_NODES"
+            --min-samples-leaf "$MIN_SAMPLES_LEAF"
+            --l2-regularization "$L2_REGULARIZATION"
+            --C "$C"
+            --run-name "ci-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
+          )
+          if [ "$TUNE" = "true" ]; then ARGS+=(--tune); fi
+          python -m mlops_ccds.modeling.train "${ARGS[@]}"
+
+      - name: Guardar métricas y gráficas del run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-${{ github.run_number }}
+          path: reports/
+          if-no-files-found: ignore
