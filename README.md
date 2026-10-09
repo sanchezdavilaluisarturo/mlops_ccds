@@ -82,6 +82,69 @@ Los pasos de `dataset.py` y `features.py` también se pueden ejecutar por separa
 intermedios en `data/processed/`, pero `train.py` no los lee: recalcula la partición desde
 `data/raw` con su propia semilla.
 
+## GitHub Actions
+
+![Workflow de entrenamiento en GitHub Actions](docs/docs/img/ci_cd.svg)
+
+El workflow `.github/workflows/entrenar.yaml` solo entrena y registra el run en MLflow; no
+corre lint ni pruebas. Se lanza a mano. Antes de entrenar comprueba que el servidor MLflow
+responda: si falta el secret o el servidor no contesta, el job termina en rojo en vez de
+entrenar sin registrar el run.
+
+### Dónde vive cada valor
+
+| Valor | Dónde | Por qué |
+|---|---|---|
+| `seed` e hiperparámetros | Inputs de `entrenar.yaml` (en git) | No son secretos y quedan versionados con el commit |
+| `MLFLOW_TRACKING_URI` | Secret | La URL pública del servidor no debe escribirse en el repositorio |
+| `MLFLOW_EXPERIMENT_NAME` | Variable | Es configuración visible; si no existe se usa `Churn_Test_Telco_v1` |
+
+Las credenciales del servidor (PostgreSQL y MinIO) no se usan en el CI: solo las necesita el
+`docker-compose`. El cliente habla únicamente con MLflow.
+
+### Cómo agregar el secret y la variable
+
+1. En GitHub, abre el repositorio: **Settings › Secrets and variables › Actions**.
+2. Pestaña **Secrets › New repository secret**. Nombre: `MLFLOW_TRACKING_URI`. Valor: la URL
+   pública de tu servidor MLflow (por ejemplo, la de ngrok).
+3. Pestaña **Variables › New repository variable**. Nombre: `MLFLOW_EXPERIMENT_NAME`. Valor:
+   `Churn_Test_Telco_v1`.
+
+Con la terminal, usando [GitHub CLI](https://cli.github.com/) (`brew install gh` y
+`gh auth login` una sola vez):
+
+```bash
+gh secret set MLFLOW_TRACKING_URI      # pide el valor; no queda en el historial del shell
+gh variable set MLFLOW_EXPERIMENT_NAME --body "Churn_Test_Telco_v1"
+gh secret list && gh variable list     # comprobar (los secrets no muestran su valor)
+```
+
+Si el servidor MLflow tuviera autenticación, se agregarían igual como secrets
+`MLFLOW_TRACKING_USERNAME` y `MLFLOW_TRACKING_PASSWORD`, y se pasarían en el `env:` del job.
+
+### Cómo lanzarlo
+
+En **Actions › Entrenamiento › Run workflow** se eligen los inputs (modelo, semilla,
+hiperparámetros, `tune`) y se pulsa el botón. Con la terminal:
+
+```bash
+gh workflow run entrenar.yaml -f seed=7 -f learning_rate=0.05
+```
+
+Cada run se nombra `ci-<número de ejecución>-<commit corto>` y la carpeta `reports/` queda como
+artifact de la ejecución.
+
+### Requisitos y límites
+
+- El runner de GitHub no ve `localhost:5002`. El secret debe ser una URL pública, y el túnel
+  (ngrok) y el servidor Docker deben estar encendidos al lanzar el workflow.
+- El botón **Run workflow** solo aparece si el archivo está en la rama principal del
+  repositorio. Mientras viva en otra rama hay que integrarlo con un pull request.
+- El dataset no está en git (`data/` se ignora): el runner lo descarga con `kagglehub`. Si pide
+  credenciales, hay que agregar `KAGGLE_USERNAME` y `KAGGLE_KEY` como secrets.
+- La semilla garantiza el mismo resultado con las mismas versiones de `requirements.txt`. El
+  runner es Linux y la verificación se hizo en macOS, así que los decimales pueden diferir.
+
 ## Reproducibilidad
 
 Dos ejecuciones con los mismos argumentos producen exactamente el mismo resultado.
@@ -235,7 +298,8 @@ Flujo de los scripts: `dataset.py` (limpieza) → `features.py` (particiones) �
 
 - Anthropic. (2026). *Claude Code* [Herramienta de línea de comandos] con el modelo Claude
   Sonnet 5.5. https://claude.com/claude-code. Se usó para generar el diagrama de la sección
-  Flujo (`docs/docs/img/flujo.svg`) mediante la herramienta Artifact y su skill
+  Flujo (`docs/docs/img/flujo.svg`) y de la sección GitHub Actions
+  (`docs/docs/img/ci_cd.svg`) mediante la herramienta Artifact y su skill
   `artifact-diagramming` (guía para dibujar diagramas en SVG que muestran el mecanismo y no solo
   los nombres de los componentes). La página interactiva del diagrama siguió además el skill
   `artifact-design`.
