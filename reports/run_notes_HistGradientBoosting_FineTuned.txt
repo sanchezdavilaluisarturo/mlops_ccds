@@ -1,0 +1,6 @@
+Entrenamiento HistGradientBoosting_FineTuned finalizado.
+Mejores parámetros: {'classifier__learning_rate': 0.06, 'classifier__max_depth': 6}
+Umbral óptimo en validación: 0.5500
+Test ROC-AUC: 0.8613
+Test PR-AUC: 0.7726
+Test F1: 0.7477
