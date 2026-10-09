@@ -19,6 +19,7 @@ from mlops_ccds.config import (
     TEST_SIZE,
     VAL_SIZE,
 )
+from mlops_ccds.dataset import clean_data, load_raw
 
 app = typer.Typer()
 
@@ -90,13 +91,30 @@ def load_splits(input_dir: Path = PROCESSED_DATA_DIR) -> Splits:
     return Splits(**parts)
 
 
+def ensure_splits(data_dir: Path = PROCESSED_DATA_DIR, seed: int = RANDOM_STATE) -> Splits:
+    """Lee las particiones de data/processed; si no existen, las genera desde el CSV crudo."""
+    if all((data_dir / f"{name}.csv").exists() for name in SPLIT_NAMES):
+        return load_splits(data_dir)
+
+    logger.info(f"No hay particiones en {data_dir}; se generan desde los datos crudos.")
+    splits = split_data(clean_data(load_raw()), random_state=seed)
+    save_splits(splits, data_dir)
+    return splits
+
+
 @app.command()
 def main(
     input_path: Path = PROCESSED_DATA_DIR / CLEAN_CSV_NAME,
     output_dir: Path = PROCESSED_DATA_DIR,
+    seed: int = typer.Option(RANDOM_STATE, help="Semilla aleatoria de la partición."),
 ):
-    logger.info("Generando particiones train/val/test...")
-    splits = split_data(_restore_types(pd.read_csv(input_path)))
+    logger.info(f"Generando particiones train/val/test (semilla {seed})...")
+    if input_path.exists():
+        df = _restore_types(pd.read_csv(input_path))
+    else:
+        logger.info(f"{input_path} no existe; se limpia el CSV crudo.")
+        df = clean_data(load_raw())
+    splits = split_data(df, random_state=seed)
     save_splits(splits, output_dir)
     for name in SPLIT_NAMES:
         y = getattr(splits, f"y_{name}")

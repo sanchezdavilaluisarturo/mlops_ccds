@@ -1,0 +1,6 @@
+Entrenamiento HGB_cli_v1 finalizado.
+Hiperparámetros: {'classifier__learning_rate': 0.1, 'classifier__max_iter': 250, 'classifier__max_depth': 8, 'classifier__max_leaf_nodes': 31, 'classifier__min_samples_leaf': 20, 'classifier__l2_regularization': 1.5, 'classifier__class_weight': 'balanced'}
+Umbral óptimo en validación: 0.6600
+Test ROC-AUC: 0.8520
+Test PR-AUC: 0.7614
+Test F1: 0.7327

@@ -1,5 +1,8 @@
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Annotated
+import urllib.error
+import urllib.request
 
 from loguru import logger
 import matplotlib.pyplot as plt
@@ -33,56 +36,102 @@ from mlops_ccds.config import (
     TEST_SIZE,
     VAL_SIZE,
 )
-from mlops_ccds.features import Splits, build_preprocessor, load_splits
+from mlops_ccds.features import Splits, build_preprocessor, ensure_splits
 from mlops_ccds.plots import plot_diagnostics, save_figure
 
 app = typer.Typer()
 
+# Hiperparámetros que se registran en MLflow para cada modelo
+LOGGED_HYPERPARAMS = {
+    "baseline": ("C", "max_iter", "class_weight"),
+    "hgb": (
+        "learning_rate",
+        "max_iter",
+        "max_depth",
+        "max_leaf_nodes",
+        "min_samples_leaf",
+        "l2_regularization",
+        "class_weight",
+    ),
+}
+
 
 @dataclass
 class ModelSpec:
+    model: str
     run_name: str
     classifier: ClassifierMixin
     thresholds: np.ndarray
     param_grid: dict = field(default_factory=dict)
 
 
-def get_model_spec(model: str, quick: bool = False) -> ModelSpec:
+def get_model_spec(
+    model: str,
+    seed: int = RANDOM_STATE,
+    hyperparams: dict | None = None,
+    tune: bool = False,
+    quick: bool = False,
+) -> ModelSpec:
+    """Construye el clasificador con los hiperparámetros recibidos por línea de comandos.
+
+    Con tune=True además se ajusta con GridSearchCV; las claves de la rejilla sustituyen a los
+    valores fijos de esas mismas claves.
+    """
+    hp = hyperparams or {}
+
     if model == "baseline":
+        classifier = LogisticRegression(
+            class_weight="balanced",
+            random_state=seed,
+            C=hp.get("C", 1.0),
+            max_iter=hp.get("max_iter", 1000),
+        )
         return ModelSpec(
+            model=model,
             run_name="Baseline_LogisticRegression",
-            classifier=LogisticRegression(
-                class_weight="balanced", random_state=RANDOM_STATE, max_iter=1000
-            ),
+            classifier=classifier,
             thresholds=np.linspace(0.01, 0.99, 100),
+            param_grid={"classifier__C": [0.01, 0.1, 1.0, 10.0]} if tune else {},
         )
+
     if model == "hgb":
-        # --quick reduce la rejilla de 324 a 2 combinaciones, solo para pruebas
-        grid = (
-            {"classifier__learning_rate": [0.06, 0.10], "classifier__max_depth": [6]}
-            if quick
-            else {
-                "classifier__learning_rate": [0.03, 0.06, 0.10],
-                "classifier__max_iter": [250, 400],
-                "classifier__max_depth": [4, 6, 8],
-                "classifier__max_leaf_nodes": [15, 31],
-                "classifier__min_samples_leaf": [20, 35, 50],
-                "classifier__l2_regularization": [0.5, 1.5, 3.0],
-            }
+        classifier = HistGradientBoostingClassifier(
+            class_weight="balanced",
+            random_state=seed,
+            early_stopping=True,
+            n_iter_no_change=15,
+            tol=1e-4,
+            scoring="roc_auc",
+            learning_rate=hp.get("learning_rate", 0.1),
+            max_iter=hp.get("max_iter", 250),
+            max_depth=hp.get("max_depth", 8),
+            max_leaf_nodes=hp.get("max_leaf_nodes", 31),
+            min_samples_leaf=hp.get("min_samples_leaf", 20),
+            l2_regularization=hp.get("l2_regularization", 1.5),
         )
+        grid = {}
+        if tune:
+            # --quick reduce la rejilla de 324 a 2 combinaciones, solo para pruebas
+            grid = (
+                {"classifier__learning_rate": [0.06, 0.10], "classifier__max_depth": [6]}
+                if quick
+                else {
+                    "classifier__learning_rate": [0.03, 0.06, 0.10],
+                    "classifier__max_iter": [250, 400],
+                    "classifier__max_depth": [4, 6, 8],
+                    "classifier__max_leaf_nodes": [15, 31],
+                    "classifier__min_samples_leaf": [20, 35, 50],
+                    "classifier__l2_regularization": [0.5, 1.5, 3.0],
+                }
+            )
         return ModelSpec(
-            run_name="HistGradientBoosting_FineTuned",
-            classifier=HistGradientBoostingClassifier(
-                class_weight="balanced",
-                random_state=RANDOM_STATE,
-                early_stopping=True,
-                n_iter_no_change=15,
-                tol=1e-4,
-                scoring="roc_auc",
-            ),
+            model=model,
+            run_name="HistGradientBoosting_FineTuned" if tune else "HistGradientBoosting",
+            classifier=classifier,
             thresholds=np.linspace(0.1, 0.9, 81),
             param_grid=grid,
         )
+
     raise typer.BadParameter(f"Modelo desconocido: {model!r}. Usa 'baseline' o 'hgb'.")
 
 
@@ -90,12 +139,12 @@ def build_pipeline(preprocessor: ColumnTransformer, classifier: ClassifierMixin)
     return Pipeline(steps=[("preprocessor", preprocessor), ("classifier", classifier)])
 
 
-def fit_model(pipeline: Pipeline, splits: Splits, param_grid: dict):
+def fit_model(pipeline: Pipeline, splits: Splits, param_grid: dict, seed: int = RANDOM_STATE):
     """Ajusta el pipeline. Con rejilla usa GridSearchCV (5 pliegues) optimizando ROC-AUC."""
     if not param_grid:
         return pipeline.fit(splits.X_train, splits.y_train), {}, None
 
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
     search = GridSearchCV(
         estimator=pipeline, param_grid=param_grid, scoring="roc_auc", cv=cv, n_jobs=-1, verbose=1
     )
@@ -125,13 +174,12 @@ def evaluate_model(pipeline: Pipeline, splits: Splits, threshold: float):
     return metrics, y_proba, y_pred
 
 
-def write_notes(run_name, best_params, threshold, metrics, reports_dir: Path) -> Path:
+def write_notes(run_name, params, threshold, metrics, reports_dir: Path) -> Path:
     reports_dir.mkdir(parents=True, exist_ok=True)
     path = reports_dir / f"run_notes_{run_name}.txt"
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"Entrenamiento {run_name} finalizado.\n")
-        if best_params:
-            f.write(f"Mejores parámetros: {best_params}\n")
+        f.write(f"Hiperparámetros: {params}\n")
         f.write(f"Umbral óptimo en validación: {threshold:.4f}\n")
         f.write(f"Test ROC-AUC: {metrics['test_roc_auc']:.4f}\n")
         f.write(f"Test PR-AUC: {metrics['test_pr_auc']:.4f}\n")
@@ -139,33 +187,51 @@ def write_notes(run_name, best_params, threshold, metrics, reports_dir: Path) ->
     return path
 
 
+def hyperparams_to_log(spec: ModelSpec, best_params: dict) -> dict:
+    """Hiperparámetros efectivos del modelo: los de la rejilla ganadora o los fijos del CLI."""
+    classifier_params = spec.classifier.get_params()
+    params = {f"classifier__{k}": classifier_params[k] for k in LOGGED_HYPERPARAMS[spec.model]}
+    params.update(best_params)
+    return params
+
+
+def mlflow_reachable(uri: str, timeout: float = 5.0) -> bool:
+    """Comprueba que el servidor MLflow responde. Las URIs locales (sqlite, file) se aceptan."""
+    if not uri.startswith(("http://", "https://")):
+        return True
+    try:
+        urllib.request.urlopen(f"{uri.rstrip('/')}/health", timeout=timeout)
+        return True
+    except urllib.error.HTTPError:
+        return True  # el servidor contestó, aunque no con 200
+    except (OSError, ValueError):  # URLError y timeout son OSError
+        return False
+
+
 def log_run(
     run_name: str,
-    spec: ModelSpec,
+    seed: int,
+    hyperparams: dict,
     pipeline: Pipeline,
     splits: Splits,
-    best_params: dict,
     cv_score: float | None,
     threshold: float,
     val_f1: float,
     metrics: dict,
     plot_path: Path,
     notes_path: Path,
+    model_type: str,
 ) -> str:
     """Registra params, métricas, gráficas, notas y el modelo en el servidor MLflow."""
     params = {
-        "model_type": type(spec.classifier).__name__,
-        "random_state": RANDOM_STATE,
+        "model_type": model_type,
+        "random_state": seed,
         "train_split_pct": round(1 - TEST_SIZE - VAL_SIZE, 2),
         "val_split_pct": VAL_SIZE,
         "test_split_pct": TEST_SIZE,
         "optimal_threshold": round(threshold, 4),
+        **hyperparams,
     }
-    if best_params:
-        params.update(best_params)
-    else:
-        classifier_params = spec.classifier.get_params()
-        params.update({k: classifier_params[k] for k in ("class_weight", "max_iter")})
 
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
@@ -191,23 +257,69 @@ def log_run(
 
 @app.command()
 def main(
-    model: str = "baseline",
-    run_name: str | None = None,
-    quick: bool = False,
-    data_dir: Path = PROCESSED_DATA_DIR,
-    log_to_mlflow: bool = True,
+    model: Annotated[str, typer.Option(help="Modelo a entrenar: 'hgb' o 'baseline'.")] = "hgb",
+    seed: Annotated[
+        int, typer.Option(help="Semilla aleatoria del modelo y la validación cruzada.")
+    ] = RANDOM_STATE,
+    learning_rate: Annotated[float, typer.Option(help="[hgb] Tasa de aprendizaje.")] = 0.1,
+    max_depth: Annotated[int, typer.Option(help="[hgb] Profundidad máxima de cada árbol.")] = 8,
+    max_leaf_nodes: Annotated[int, typer.Option(help="[hgb] Máximo de hojas por árbol.")] = 31,
+    min_samples_leaf: Annotated[int, typer.Option(help="[hgb] Mínimo de muestras por hoja.")] = 20,
+    l2_regularization: Annotated[float, typer.Option(help="[hgb] Regularización L2.")] = 1.5,
+    max_iter: Annotated[
+        int | None,
+        typer.Option(
+            help="[hgb, baseline] Iteraciones máximas (por defecto: 250 en hgb, 1000 en baseline)."
+        ),
+    ] = None,
+    c: Annotated[
+        float, typer.Option("--C", help="[baseline] Inverso de la regularización.")
+    ] = 1.0,
+    tune: Annotated[
+        bool, typer.Option(help="Busca los hiperparámetros con GridSearchCV.")
+    ] = False,
+    quick: Annotated[
+        bool, typer.Option(help="Con --tune, usa una rejilla mínima (pruebas).")
+    ] = False,
+    run_name: Annotated[str | None, typer.Option(help="Nombre del run en MLflow.")] = None,
+    data_dir: Annotated[
+        Path, typer.Option(help="Carpeta con train/val/test.csv.")
+    ] = PROCESSED_DATA_DIR,
+    log_to_mlflow: Annotated[bool, typer.Option(help="Registra el run en MLflow.")] = True,
 ):
-    """Entrena un modelo (baseline | hgb), lo evalúa en Test y registra el run en MLflow."""
-    spec = get_model_spec(model, quick)
+    """Entrena un modelo de churn, lo evalúa en Test y registra el run en MLflow.
+
+    Sin argumentos entrena HistGradientBoosting con los hiperparámetros por defecto.
+    """
+    hyperparams = {
+        "learning_rate": learning_rate,
+        "max_depth": max_depth,
+        "max_leaf_nodes": max_leaf_nodes,
+        "min_samples_leaf": min_samples_leaf,
+        "l2_regularization": l2_regularization,
+        "C": c,
+    }
+    if max_iter is not None:
+        hyperparams["max_iter"] = max_iter
+
+    spec = get_model_spec(model, seed, hyperparams, tune, quick)
     run_name = run_name or spec.run_name
 
-    splits = load_splits(data_dir)
+    if log_to_mlflow and not mlflow_reachable(MLFLOW_TRACKING_URI):
+        logger.warning(
+            f"MLflow no responde en {MLFLOW_TRACKING_URI}; se entrena sin registrar el run."
+        )
+        log_to_mlflow = False
+
+    splits = ensure_splits(data_dir)
     pipeline = build_pipeline(build_preprocessor(splits.X_train), spec.classifier)
 
-    logger.info(f"[{run_name}] Entrenando...")
-    pipeline, best_params, cv_score = fit_model(pipeline, splits, spec.param_grid)
+    logger.info(f"[{run_name}] Entrenando (semilla {seed})...")
+    pipeline, best_params, cv_score = fit_model(pipeline, splits, spec.param_grid, seed)
     if best_params:
         logger.info(f"Mejores parámetros: {best_params} | ROC-AUC CV: {cv_score:.4f}")
+    logged_params = hyperparams_to_log(spec, best_params)
+    logger.info(f"Hiperparámetros: {logged_params}")
 
     threshold, val_f1 = select_threshold(pipeline, splits, spec.thresholds)
     logger.info(f"Umbral óptimo en Val: {threshold:.4f} (F1 Val: {val_f1:.4f})")
@@ -223,15 +335,25 @@ def main(
     fig = plot_diagnostics(splits.y_test, y_proba, y_pred, threshold, metrics)
     plot_path = save_figure(fig, FIGURES_DIR / f"{run_name}_evaluation_plots.png")
     plt.close(fig)
-    notes_path = write_notes(run_name, best_params, threshold, metrics, REPORTS_DIR)
+    notes_path = write_notes(run_name, logged_params, threshold, metrics, REPORTS_DIR)
 
     if not log_to_mlflow:
-        logger.warning("--no-log-to-mlflow: el run no se registró en MLflow.")
+        logger.warning("El run no se registró en MLflow.")
         return
     run_id = log_run(
-        run_name, spec, pipeline, splits, best_params, cv_score,
-        threshold, val_f1, metrics, plot_path, notes_path,
-    )  # fmt: skip
+        run_name,
+        seed,
+        logged_params,
+        pipeline,
+        splits,
+        cv_score,
+        threshold,
+        val_f1,
+        metrics,
+        plot_path,
+        notes_path,
+        type(spec.classifier).__name__,
+    )
     logger.success(f"RUN ID registrado en MLflow: {run_id}")
 
 
