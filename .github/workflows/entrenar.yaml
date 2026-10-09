@@ -2,7 +2,7 @@ name: Entrenamiento
 
 # Solo entrena y registra el run en MLflow. No corre lint ni pruebas.
 # Se lanza a mano: Actions > Entrenamiento > Run workflow, o con
-#   gh workflow run entrenar.yaml -f seed=7 -f learning_rate=0.05
+#   gh workflow run entrenar.yaml -f run_name=HGB_cli_v2 -f seed=7 -f learning_rate=0.05
 #
 # Dónde vive cada valor:
 #   - Aquí, en git: la semilla y los hiperparámetros por defecto (inputs).
@@ -16,6 +16,9 @@ on:
         type: choice
         options: [hgb, baseline]
         default: hgb
+      run_name:
+        description: Nombre del run en MLflow (vacío = el nombre por defecto de train.py)
+        default: ""
       seed:
         description: Semilla aleatoria (partición, modelo y validación cruzada)
         default: "42"
@@ -85,6 +88,7 @@ jobs:
         # Los inputs pasan por env y se citan en el comando; no se interpolan dentro del script.
         env:
           MODEL: ${{ inputs.model }}
+          RUN_NAME: ${{ inputs.run_name }}
           SEED: ${{ inputs.seed }}
           LEARNING_RATE: ${{ inputs.learning_rate }}
           MAX_DEPTH: ${{ inputs.max_depth }}
@@ -103,8 +107,8 @@ jobs:
             --min-samples-leaf "$MIN_SAMPLES_LEAF"
             --l2-regularization "$L2_REGULARIZATION"
             --C "$C"
-            --run-name "ci-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
           )
+          if [ -n "$RUN_NAME" ]; then ARGS+=(--run-name "$RUN_NAME"); fi
           if [ "$TUNE" = "true" ]; then ARGS+=(--tune); fi
           python -m mlops_ccds.modeling.train "${ARGS[@]}"
 

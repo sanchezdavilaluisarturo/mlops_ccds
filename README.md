@@ -128,11 +128,14 @@ En **Actions › Entrenamiento › Run workflow** se eligen los inputs (modelo, 
 hiperparámetros, `tune`) y se pulsa el botón. Con la terminal:
 
 ```bash
-gh workflow run entrenar.yaml -f seed=7 -f learning_rate=0.05
+gh workflow run entrenar.yaml -f run_name=HGB_cli_v2 -f seed=7 -f learning_rate=0.05
 ```
 
-Cada run se nombra `ci-<número de ejecución>-<commit corto>` y la carpeta `reports/` queda como
-artifact de la ejecución.
+El nombre del run en MLflow se elige con el input `run_name` (por ejemplo `HGB_cli_v2`). Si se
+deja vacío, `train.py` usa su nombre por defecto (`HistGradientBoosting`,
+`HistGradientBoosting_FineTuned` con `tune`, o `Baseline_LogisticRegression`). Como los runs
+pueden repetir nombre, conviene cambiarlo en cada ejecución para distinguirlos. La carpeta
+`reports/` queda como artifact de la ejecución.
 
 ### Requisitos y límites
 
