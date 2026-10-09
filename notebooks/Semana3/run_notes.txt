@@ -1,0 +1,6 @@
+Entrenamiento con HistGradientBoosting finalizado.
+Mejores parámetros: {'classifier__l2_regularization': 0.5, 'classifier__learning_rate': 0.1, 'classifier__max_depth': 6, 'classifier__max_iter': 250, 'classifier__max_leaf_nodes': 15, 'classifier__min_samples_leaf': 20}
+Umbral óptimo en validación: 0.5200
+Test ROC-AUC: 0.8523
+Test PR-AUC: 0.7700
+Test F1: 0.7547
