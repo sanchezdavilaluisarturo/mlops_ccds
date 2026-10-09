@@ -12,7 +12,7 @@ experimentos en MLflow.
 * **Alumno:** Luis Arturo Sánchez Davila
 * **Matrícula:** A01840576
 * **Materia:** Operaciones de aprendizaje automático (Gpo 10)
-* **Actividad:** Actividad | Dataset - Notebook | Individual
+* **Actividad:** Actividad Individual | Código de experimentación base con MLFlow
 * **Repositorio:** [GitHub ](https://github.com/sanchezdavilaluisarturo/mlops_ccds/tree/Separar_Actividad)
 
 ## Instalación
