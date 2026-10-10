@@ -24,6 +24,7 @@ experimentos en MLflow.
   - [Dónde vive cada valor](#dónde-vive-cada-valor)
   - [Cómo agregar el secret y la variable](#cómo-agregar-el-secret-y-la-variable)
   - [Cómo lanzarlo](#cómo-lanzarlo)
+  - [Ejemplo: las cinco corridas desde GitHub Actions](#ejemplo-las-cinco-corridas-desde-github-actions)
   - [Requisitos y límites](#requisitos-y-límites)
   - [Corridas registradas desde GitHub Actions](#corridas-registradas-desde-github-actions)
   - [Comparación de modelos y mejor modelo](#comparación-de-modelos-y-mejor-modelo)
@@ -167,6 +168,41 @@ deja vacío, `train.py` usa su nombre por defecto (`HistGradientBoosting`,
 `HistGradientBoosting_FineTuned` con `tune`, o `Baseline_LogisticRegression`). Como los runs
 pueden repetir nombre, conviene cambiarlo en cada ejecución para distinguirlos. La carpeta
 `reports/` queda como artifact de la ejecución.
+
+### Ejemplo: las cinco corridas desde GitHub Actions
+
+Cada corrida es un **Run workflow** distinto en **Actions › Entrenamiento**, cambiando solo los
+inputs. Los inputs que no se mencionan quedan en su valor por defecto (`seed=42`, y para `hgb`
+`learning_rate=0.1`, `max_depth=8`, `max_leaf_nodes=31`, `min_samples_leaf=20`,
+`l2_regularization=1.5`). Las mismas cinco con GitHub CLI, en el orden en que se lanzaron:
+
+```bash
+# 1. Referencia: regresión logística
+gh workflow run entrenar.yaml -f model=baseline -f run_name=baseline
+
+# 2. Regularización fuerte para evitar sobreajuste
+gh workflow run entrenar.yaml -f run_name=Anti-Overfitting \
+  -f learning_rate=0.03 -f max_depth=5 -f max_leaf_nodes=20 \
+  -f min_samples_leaf=40 -f l2_regularization=3.0
+
+# 3. Exploración estándar
+gh workflow run entrenar.yaml -f run_name="Exploracion estandar" \
+  -f learning_rate=0.08 -f max_depth=8 -f max_leaf_nodes=31 \
+  -f min_samples_leaf=20 -f l2_regularization=1.0
+
+# 4. Agresiva: árboles profundos para capturar patrones complejos
+gh workflow run entrenar.yaml -f run_name="agresiva - Captura de patrones Complejos" \
+  -f learning_rate=0.15 -f max_depth=12 -f max_leaf_nodes=63 \
+  -f min_samples_leaf=10 -f l2_regularization=0.1
+
+# 5. Búsqueda automática de hiperparámetros (tarda más)
+gh workflow run entrenar.yaml -f run_name=GridSearchCV -f tune=true
+```
+
+Cada corrida termina en verde cuando el run queda registrado en MLflow; el resultado de las cinco
+se compara en la sección anterior.
+
+![Cinco corridas del workflow Entrenamiento en GitHub Actions y formulario Run workflow con los inputs](docs/docs/img/github_actions_corridas.png)
 
 ### Requisitos y límites
 
