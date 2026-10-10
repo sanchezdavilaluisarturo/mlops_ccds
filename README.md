@@ -14,6 +14,27 @@ experimentos en MLflow.
 * **Materia:** Operaciones de aprendizaje automático (Gpo 10)
 * **Actividad:** Actividad Individual | Código de experimentación base con MLFlow
 * **Repositorio:** [GitHub ](https://github.com/sanchezdavilaluisarturo/mlops_ccds/tree/Separar_Actividad)
+* 
+
+## Índice
+
+- [Instalación](#instalación)
+- [Ejecución](#ejecución)
+- [Flujo](#flujo)
+- [GitHub Actions](#github-actions)
+  - [Dónde vive cada valor](#dónde-vive-cada-valor)
+  - [Cómo agregar el secret y la variable](#cómo-agregar-el-secret-y-la-variable)
+  - [Cómo lanzarlo](#cómo-lanzarlo)
+  - [Requisitos y límites](#requisitos-y-límites)
+  - [Corridas registradas desde GitHub Actions](#corridas-registradas-desde-github-actions)
+  - [Comparación de modelos y mejor modelo](#comparación-de-modelos-y-mejor-modelo)
+- [Ramas y control de versiones](#ramas-y-control-de-versiones)
+- [Reproducibilidad](#reproducibilidad)
+- [Dependencias](#dependencias)
+- [Organización del proyecto](#organización-del-proyecto)
+- [Referencias](#referencias)
+
+
 
 ## Instalación
 
@@ -35,6 +56,18 @@ docker-compose --env-file config.env up -d --build
 La interfaz queda en `http://localhost:5002`. El script usa esa dirección por defecto; se puede
 cambiar con `MLFLOW_TRACKING_URI` en `.env`. Si el servidor no responde, el entrenamiento corre
 igual y avisa que el run no se registró.
+
+Para exponer el servidor fuera de tu máquina (necesario para GitHub Actions o para registrar
+desde un notebook en otro equipo) se abre un túnel con ngrok hacia el puerto de MLflow:
+
+```bash
+ngrok http 5002 --host-header="localhost:5002"
+```
+
+`--host-header` reescribe el `Host` de cada petición a `localhost:5002`. La URL pública que
+muestra ngrok es la que se guarda como secret `MLFLOW_TRACKING_URI` (ver GitHub Actions). Su
+dominio debe coincidir con `MLFLOW_SERVER_ALLOWED_ORIGINS` y `--cors-allowed-origins` en
+`docker-compose.yaml`; si cambia, hay que actualizarlo ahí y reiniciar el contenedor de MLflow.
 
 ## Ejecución
 
@@ -86,8 +119,7 @@ intermedios en `data/processed/`, pero `train.py` no los lee: recalcula la parti
 
 ![Workflow de entrenamiento en GitHub Actions](docs/docs/img/ci_cd.svg)
 
-El workflow `.github/workflows/entrenar.yaml` solo entrena y registra el run en MLflow; no
-corre lint ni pruebas. Se lanza a mano. Antes de entrenar comprueba que el servidor MLflow
+El workflow `.github/workflows/entrenar.yaml` solo entrena y registra el run en MLflow; Se lanza a mano. Antes de entrenar comprueba que el servidor MLflow
 responda: si falta el secret o el servidor no contesta, el job termina en rojo en vez de
 entrenar sin registrar el run.
 
@@ -147,6 +179,77 @@ pueden repetir nombre, conviene cambiarlo en cada ejecución para distinguirlos.
   credenciales, hay que agregar `KAGGLE_USERNAME` y `KAGGLE_KEY` como secrets.
 - La semilla garantiza el mismo resultado con las mismas versiones de `requirements.txt`. El
   runner es Linux y la verificación se hizo en macOS, así que los decimales pueden diferir.
+
+### Corridas registradas desde GitHub Actions
+
+Los runs que se ven en MLflow se lanzaron desde este workflow (no desde la terminal local),
+cambiando los inputs de `entrenar.yaml`. Cada columna es un run; `classifier__*` son los
+hiperparámetros que quedan en `log_params`:
+
+| Run Name | Modelo | `learning_rate` | `max_depth` | `max_leaf_nodes` | `min_samples_leaf` | `l2_regularization` | `optimal_threshold` |
+|---|---|---|---|---|---|---|---|
+| `GridSearchCV` | HistGradientBoosting | 0.1 | 6 | 15 | 20 | 0.5 | 0.52 |
+| `agresiva - Captura de patrones Complejos` | HistGradientBoosting | 0.15 | 12 | 63 | 10 | 0.1 | 0.43 |
+| `Exploracion estandar` | HistGradientBoosting | 0.08 | 8 | 31 | 20 | 1.0 | 0.57 |
+| `Anti-Overfitting` | HistGradientBoosting | 0.03 | 5 | 20 | 40 | 3.0 | 0.64 |
+| `baseline` | LogisticRegression (`C=1.0`, `max_iter=1000`) | — | — | — | — | — | 0.6732 |
+
+Todos usan `class_weight=balanced` y `max_iter=250` (salvo el baseline). El nombre de cada run
+sale del input `run_name`. `GridSearchCV` es la corrida con `tune` activado, por eso sus
+hiperparámetros son los que eligió la búsqueda y no los valores por defecto del workflow. En la
+interfaz de MLflow se comparan seleccionando los runs y pulsando **Compare**.
+
+### Comparación de modelos y mejor modelo
+
+Métricas de los mismos cinco runs. Las de `test_*` se calculan sobre el conjunto de prueba con el
+umbral óptimo de cada run; `val_best_f1_score` es el F1 en validación con ese umbral:
+
+| Métrica | 🏆 `GridSearchCV` | `agresiva` | `Exploracion estandar` | `Anti-Overfitting` | `baseline` |
+|---|---|---|---|---|---|
+| `cv_best_train_roc_auc` | **0.917** | NaN | NaN | NaN | NaN |
+| `test_f1_score` | **0.755** | 0.716 | 0.748 | 0.639 | 0.348 |
+| `test_pr_auc` | **0.770** | 0.767 | 0.761 | 0.719 | 0.307 |
+| `test_precision` | **0.833** | 0.765 | 0.816 | 0.609 | 0.311 |
+| `test_recall` | 0.690 | 0.672 | 0.690 | 0.672 | 0.397 |
+| `test_roc_auc` | 0.852 | **0.864** | 0.863 | 0.851 | 0.723 |
+| `val_best_f1_score` | **0.897** | 0.893 | 0.877 | 0.862 | 0.639 |
+
+> 🏆 **Mejor modelo: `GridSearchCV`** (HistGradientBoosting con `learning_rate=0.1`, `max_depth=6`,
+> `max_leaf_nodes=15`, `min_samples_leaf=20`, `l2_regularization=0.5`, umbral `0.52`).
+> F1 de prueba **0.755**, PR-AUC **0.770**, precisión **0.833**.
+
+Es el mejor en F1, PR-AUC y precisión de prueba y en F1 de
+validación, y empata en recall con `Exploracion estandar`. Solo pierde en `test_roc_auc`
+(0.852 frente a 0.864 de `agresiva`), una diferencia pequeña. Como el churn es una clase
+minoritaria, F1 y PR-AUC son más informativas que ROC-AUC. `cv_best_train_roc_auc` solo existe
+en este run porque es el único que hizo validación cruzada (`NaN` en los demás significa que
+no se registró, no que fallara). El `baseline` queda muy por debajo (F1 0.348), lo que justifica
+usar un modelo de boosting.
+
+#### Comprobación en MLflow
+
+Captura de la vista **Compare** del servidor MLflow (`localhost:5002`) con los cinco runs: los
+parámetros, las métricas y las fechas de ejecución llegaron al servidor desde el workflow.
+
+![Comparación de los cinco runs en MLflow](docs/docs/img/mlflow_comparacion_runs.png)
+
+## Ramas y control de versiones
+
+El trabajo se separó en ramas en GitHub y al final todo se integró a `main`, que es la rama
+productiva (la única desde la que aparece el botón **Run workflow**):
+
+| Rama | Contenido |
+|---|---|
+| `main` | Base del proyecto con la plantilla CCDS (`Primera Version Ocupando mlops_ccds`) y rama productiva final |
+| `Separar_Actividad` | Refactor de la actividad en clases y módulos (`refactoring_primera_version`, `Primera_version_en_python`, `Parametriza la ejecución`) y ajustes del README |
+| `CI_CD_Github` | Configuración de GitHub Actions (`adding github`) y el input `run_name` (`agregando nombre del run`) |
+
+`CI_CD_Github` salió de `Separar_Actividad`, así que sus commits incluyen los del refactor. La
+integración a `main` se hizo con pull requests: el
+[#1](https://github.com/sanchezdavilaluisarturo/mlops_ccds/pull/1) y el
+[#2](https://github.com/sanchezdavilaluisarturo/mlops_ccds/pull/2), ambos desde `CI_CD_Github`.
+
+![Ramas y commits del repositorio](docs/docs/img/git_ramas.png)
 
 ## Reproducibilidad
 
@@ -224,7 +327,7 @@ fijar con `pip freeze` solo las librerías directas.
 ├── models               <- Modelos serializados (el modelo oficial vive en MLflow/MinIO)
 │
 ├── notebooks
-│   ├── 1.0-lsd-baseline-churn.ipynb    <- Notebook de la entrega original
+│   ├── 1.0-lsd-baseline-churn.ipynb    <- Notebook de la entrega Semana 3
 │   ├── 1.1-lsd-churn-refactored.ipynb  <- Misma lógica en clases (DataExplorer,
 │   │                                      ChurnDataset, ChurnModel)
 │   └── Semana3                         <- Notas de corridas anteriores
@@ -308,4 +411,4 @@ Flujo de los scripts: `dataset.py` (limpieza) → `features.py` (particiones) �
   `artifact-design`.
 - Anthropic. (2026). *Claude Code* [Herramienta de línea de comandos] con el modelo Claude
   Sonnet 5.5. https://claude.com/claude-code. Se usó para la limpieza y refactorización del
-  código y para agregar comentarios a nivel de código:
+  código, comentarios a nivel de código y creación de README. 
