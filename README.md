@@ -14,7 +14,6 @@ experimentos en MLflow.
 * **Materia:** Operaciones de aprendizaje automático (Gpo 10)
 * **Actividad:** Actividad Individual | Código de experimentación base con MLFlow
 * **Repositorio:** [GitHub ](https://github.com/sanchezdavilaluisarturo/mlops_ccds/tree/Separar_Actividad)
-* 
 
 ## Índice
 
